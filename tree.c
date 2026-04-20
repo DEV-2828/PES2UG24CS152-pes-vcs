@@ -15,6 +15,9 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include "index.h"
+
+extern int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
 
 // ─── Mode Constants ─────────────────────────────────────────────────────────
 
@@ -129,9 +132,65 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
+static int write_tree_level(const IndexEntry *entries, int count, int depth, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+    
+    int i = 0;
+    while (i < count) {
+        const char *path = entries[i].path;
+        const char *slash = strchr(path + depth, '/');
+        
+        if (!slash) {
+            TreeEntry *te = &tree.entries[tree.count++];
+            te->mode = entries[i].mode;
+            te->hash = entries[i].hash;
+            strcpy(te->name, path + depth);
+            i++;
+        } else {
+            int dir_len = slash - (path + depth);
+            int j = i + 1;
+            while (j < count) {
+                const char *j_path = entries[j].path;
+                if (strncmp(j_path + depth, path + depth, dir_len) == 0 && j_path[depth + dir_len] == '/') {
+                    j++;
+                } else {
+                    break;
+                }
+            }
+            
+            ObjectID sub_id;
+            if (write_tree_level(&entries[i], j - i, depth + dir_len + 1, &sub_id) != 0) {
+                return -1;
+            }
+            
+            TreeEntry *te = &tree.entries[tree.count++];
+            te->mode = 0040000;
+            te->hash = sub_id;
+            strncpy(te->name, path + depth, dir_len);
+            te->name[dir_len] = '\0';
+            
+            i = j;
+        }
+    }
+    
+    void *data;
+    size_t len;
+    if (tree_serialize(&tree, &data, &len) != 0) return -1;
+    
+    int rc = object_write(OBJ_TREE, data, len, id_out);
+    free(data);
+    return rc;
+}
+
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+    Index idx;
+    if (index_load(&idx) != 0) {
+        // If index doesn't exist yet, we can't build a tree.
+        // Actually, init might just do nothing until first add.
+        // Returning -1 is safe if it fails to load.
+        idx.count = 0; // fallback just in case
+    }
+    
+    return write_tree_level(idx.entries, idx.count, 0, id_out);
 }
