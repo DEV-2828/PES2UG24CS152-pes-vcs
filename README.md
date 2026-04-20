@@ -600,3 +600,60 @@ The following questions cover filesystem concepts beyond the implementation scop
 - **Git Internals** (Pro Git book): https://git-scm.com/book/en/v2/Git-Internals-Plumbing-and-Porcelain
 - **Git from the inside out**: https://codewords.recurse.com/issues/two/git-from-the-inside-out
 - **The Git Parable**: https://tom.preston-werner.com/2009/05/19/the-git-parable.html
+
+
+# PES-VCS Analysis Questions & Screenshots
+
+## Phase Screenshots
+
+### Phase 1: Object Storage Foundation
+**Screenshot 1A:**
+![Screenshot 1A](Screenshots/1A.png)
+
+**Screenshot 1B:**
+![Screenshot 1B](Screenshots/1B.png)
+
+### Phase 2: Tree Objects
+**Screenshot 2A:**
+![Screenshot 2A](Screenshots/2A.png)
+
+**Screenshot 2B:**
+![Screenshot 2B](Screenshots/2B.png)
+
+### Phase 3: The Index (Staging Area)
+**Screenshot 3A:**
+![Screenshot 3A](Screenshots/3A.png)
+
+**Screenshot 3B:**
+![Screenshot 3B](Screenshots/3B.png)
+
+### Phase 4: Commits and History
+**Screenshot 4A:**
+![Screenshot 4A](Screenshots/4A.png)
+
+**Screenshot 4B:**
+![Screenshot 4B](Screenshots/4B.png)
+
+**Screenshot 4C:**
+![Screenshot 4C](Screenshots/4C.png)
+
+## Phase 5 & 6: Analysis-Only Questions
+
+### Branching and Checkout
+
+**Q5.1: A branch in Git is just a file in `.git/refs/heads/` containing a commit hash. Creating a branch is creating a file. Given this, how would you implement `pes checkout <branch>` — what files need to change in `.pes/`, and what must happen to the working directory? What makes this operation complex?**
+**Answer:** To implement `pes checkout <branch>`, I would first update `.pes/HEAD` to point to the new branch (e.g., `ref: refs/heads/<branch>`). Then, I would read the commit hash from that branch file, load its associated tree object, and traverse the tree to extract the repository files. Finally, I would clear the current working directory files tracked by the index and replace them with the files from the newly checked-out tree, updating `.pes/index` accordingly. This operation is complex because it requires managing uncommitted changes in the working directory gracefully, restoring the exact filesystem state recursively from snapshots, and ensuring no files are inadvertently deleted or corrupted during the swap.
+
+**Q5.2: When switching branches, the working directory must be updated to match the target branch's tree. If the user has uncommitted changes to a tracked file, and that file differs between branches, checkout must refuse. Describe how you would detect this "dirty working directory" conflict using only the index and the object store.**
+**Answer:** To detect a "dirty working directory", we compare the file's current properties against the index. Using `stat()`, we check for metadata drift (mtime and size). If the metadata differs, or if the current file's hash differs from the one stored in `.pes/index`, it has uncommitted changes. Then, we fetch the target branch's root tree from the object store and traverse it to find the corresponding file's hash. If the uncommitted file's active state differs from the hash staged for checkout in the target branch, a collision occurs, meaning checkout would overwrite manual work, so the operation must be blocked.
+
+**Q5.3: "Detached HEAD" means HEAD contains a commit hash directly instead of a branch reference. What happens if you make commits in this state? How could a user recover those commits?**
+**Answer:** If you make commits in a "Detached HEAD" state, new commits are created and `.pes/HEAD` is updated with their direct hashes, but no branch reference is updated to point to them. If you then checkout another branch, those new commits become "unreachable" via standard branch names, essentially becoming orphaned. A user could recover those commits if they recorded the exact commit hash before leaving the detached state (or recovered it via an index like `git reflog`), at which point they could forcefully checkout that hash or point a new branch reference file inside `refs/heads` directly to it.
+
+### Garbage Collection and Space Reclamation
+
+**Q6.1: Over time, the object store accumulates unreachable objects — blobs, trees, or commits that no branch points to (directly or transitively). Describe an algorithm to find and delete these objects. What data structure would you use to track "reachable" hashes efficiently? For a repository with 100,000 commits and 50 branches, estimate how many objects you'd need to visit.**
+**Answer:** To find and delete unreachable objects (Garbage Collection), we use a Reachability Graph algorithm (like Mark-and-Sweep). We start by reading all branch references in `.pes/refs/heads/` and the `.pes/HEAD` file as root nodes. Using a **Hash Set** (or Bloom filter) to efficiently track "reachable" hashes, we walk up the parent commit chains backwards, marking all commits. For each marked commit, we traverse its tree recursively, inserting all tree and blob hashes into our Hash Set. Finally, we iterate over every object in `.pes/objects/` and delete any file whose hash is not present in our Hash Set. For a repository of 100,000 commits and 50 branches, we ideally memoize and visit the 100,000 commits and traverse their associated trees once, resulting in possibly visiting hundreds of thousands to a few million objects depending on project size and tree depth.
+
+**Q6.2: Why is it dangerous to run garbage collection concurrently with a commit operation? Describe a race condition where GC could delete an object that a concurrent commit is about to reference. How does Git's real GC avoid this?**
+**Answer:** Concurrent garbage collection during a commit is dangerous because a new commit operation involves creating "loose" blob and tree objects in the object store sequentially *before* the final commit object and HEAD reference are generated to link and protect them. If GC runs midway, it will scan the current branches, observe that these fresh objects are not yet reachable (since the branch pointer hasn't moved yet), and aggressively delete them. When the final `head_update` occurs, the repository will be irreparably corrupted with missing tree/blob files. Git’s real GC (`git gc`) avoids this by ignoring recent objects (by default, ignoring objects modified within the last 2 weeks) so concurrent tasks have plenty of time to link them.
